@@ -5,31 +5,96 @@ import dotenv from "dotenv";
 
 import { askOllama } from "./utils/ollama.js";
 import { parseLLMJson } from "./utils/parseJson.js";
+
 import { CandidateProfileSchema } from "./schemas/candidateProfile.schema.js";
-import { createInterview } from "./store/interviewStore.js";
-import { getInterview } from "./store/interviewStore.js";
+
+import {
+    createInterview,
+    getInterview
+} from "./store/interviewStore.js";
+
 import { getCurrentTopic } from "./utils/interviewCurrentTopic.js";
 import { getNextDifficulty } from "./utils/computeDifficulty.js";
+
 import { AnswerEvaluationSchema } from "./schemas/answerEvaluation.schema.js";
 import { generateOverallEvaluation } from "./utils/generateOverallEvaluation.js";
+
 import cors from "cors";
 import Groq from "groq-sdk";
 
+
 dotenv.config();
+
+
+// ============================================================
+// GROQ
+// ============================================================
 
 const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY
 });
 
+
 const app = express();
 
-app.use(cors())
+app.use(cors());
 
 app.use(express.json());
 
 
+// ============================================================
+// TTS HELPER
+// ============================================================
+
+async function generateQuestionAudio(text) {
+
+    if (!text || !text.trim()) {
+        throw new Error("TTS text is empty");
+    }
+
+
+    const trimmedText = text.trim();
+
+
+    if (trimmedText.length > 700) {
+        throw new Error(
+            `TTS text exceeds 700 characters (${trimmedText.length})`
+        );
+    }
+
+
+    const response = await groq.audio.speech.create({
+        model: "canopylabs/orpheus-v1-english",
+
+        voice:
+            process.env.GROQ_TTS_VOICE ||
+            "troy",
+
+        input: trimmedText,
+
+        response_format: "wav"
+    });
+
+
+    const audioBuffer = Buffer.from(
+        await response.arrayBuffer()
+    );
+
+
+    return {
+        audio: audioBuffer.toString("base64"),
+        audioMimeType: "audio/wav"
+    };
+}
+
+
+// ============================================================
+// START INTERVIEW
+// ============================================================
+
 app.post(
     "/start-interview",
+
     upload.single("file"),
 
     async (req, res) => {
@@ -41,9 +106,11 @@ app.post(
             // --------------------------------
 
             if (!req.file) {
+
                 return res.status(400).json({
                     message: "Resume PDF is required"
                 });
+
             }
 
 
@@ -51,32 +118,47 @@ app.post(
             // 2. Validate job description
             // --------------------------------
 
-            const { jobDescription } = req.body;
+            const {
+                jobDescription
+            } = req.body;
 
-            if (!jobDescription || !jobDescription.trim()) {
+
+            if (
+                !jobDescription ||
+                !jobDescription.trim()
+            ) {
+
                 return res.status(400).json({
                     message: "Job description is required"
                 });
+
             }
 
 
             // --------------------------------
-            // 3. Extract text from PDF
+            // 3. Extract resume text
             // --------------------------------
 
             const parser = new PDFParse({
                 data: req.file.buffer
             });
 
-            const resume = await parser.getText();
 
-            const resumeText = resume.text.trim();
+            const resume =
+                await parser.getText();
+
+
+            const resumeText =
+                resume.text.trim();
 
 
             if (!resumeText) {
+
                 return res.status(400).json({
-                    message: "Could not extract text from resume"
+                    message:
+                        "Could not extract text from resume"
                 });
+
             }
 
 
@@ -148,17 +230,21 @@ Use exactly this structure:
 `;
 
 
-            const profileResponse = await askOllama(
-                profilePrompt,
-                resumeText
-            );
+            const profileResponse =
+                await askOllama(
+                    profilePrompt,
+                    resumeText
+                );
 
 
             // --------------------------------
-            // 5. Clean + parse LLM response
+            // 5. Parse profile
             // --------------------------------
 
-            const profile = parseLLMJson(profileResponse);
+            const profile =
+                parseLLMJson(
+                    profileResponse
+                );
 
 
             // --------------------------------
@@ -166,7 +252,9 @@ Use exactly this structure:
             // --------------------------------
 
             const validatedProfile =
-                CandidateProfileSchema.parse(profile);
+                CandidateProfileSchema.parse(
+                    profile
+                );
 
 
             // --------------------------------
@@ -199,6 +287,15 @@ Do not use Markdown.
 Do not wrap the JSON in code fences.
 Do not add explanations.
 
+IMPORTANT:
+- The interview must contain EXACTLY 10 questions in total.
+- Do not create more than 10 questions.
+- Do not create fewer than 10 questions.
+- Distribute the 10 questions across the most relevant topics.
+- Questions should progressively adapt from easy to medium to hard where appropriate.
+- Include practical and conceptual questions.
+- Avoid duplicate questions.
+
 Use this structure:
 
 {
@@ -224,7 +321,11 @@ Use this structure:
             const plannerUserPrompt = `
 CANDIDATE PROFILE:
 
-${JSON.stringify(validatedProfile, null, 2)}
+${JSON.stringify(
+    validatedProfile,
+    null,
+    2
+)}
 
 
 JOB DESCRIPTION:
@@ -233,10 +334,11 @@ ${jobDescription}
 `;
 
 
-            const planResponse = await askOllama(
-                plannerSystemPrompt,
-                plannerUserPrompt
-            );
+            const planResponse =
+                await askOllama(
+                    plannerSystemPrompt,
+                    plannerUserPrompt
+                );
 
 
             // --------------------------------
@@ -244,261 +346,705 @@ ${jobDescription}
             // --------------------------------
 
             const interviewPlan =
-                parseLLMJson(planResponse);
+                parseLLMJson(
+                    planResponse
+                );
 
-
-
-            const interviewId = createInterview({
-                candidateProfile: validatedProfile,
-                jobDescription,
-                interviewPlan
-            });
 
             // --------------------------------
-            // 9. Send response
+            // 9. Create interview
+            // --------------------------------
+
+            const interviewId =
+                createInterview({
+
+                    candidateProfile:
+                        validatedProfile,
+
+                    jobDescription,
+
+                    interviewPlan
+
+                });
+
+
+            // --------------------------------
+            // 10. Response
             // --------------------------------
 
             return res.status(200).json({
 
-                message: "Interview initialized successfully",
+                message:
+                    "Interview initialized successfully",
+
                 interviewId,
-                candidate: validatedProfile,
+
+                candidate:
+                    validatedProfile,
+
                 interviewPlan
 
             });
 
+
         } catch (error) {
 
             console.error(
-                "Error:",
+                "Start interview error:",
                 error.response?.data ||
                 error.message
             );
 
 
             return res.status(500).json({
-                message: "Something went wrong while starting the interview"
+
+                message:
+                    "Something went wrong while starting the interview"
+
             });
+
         }
     }
 );
 
 
-// Helper to generate a single concise question using Ollama
-async function generateQuestion(interview, questionNumber, difficulty) {
-    const currentTopic = getCurrentTopic(
-        interview.interviewPlan.topics,
-        questionNumber - 1
-    );
+// ============================================================
+// GENERATE ONE QUESTION
+// ============================================================
 
-    if (!currentTopic || questionNumber > interview.totalQuestions) {
+async function generateQuestion(
+    interview,
+    questionNumber,
+    difficulty
+) {
+
+    const currentTopic =
+        getCurrentTopic(
+            interview.interviewPlan.topics,
+            questionNumber - 1
+        );
+
+
+    if (
+        !currentTopic ||
+        questionNumber >
+            interview.totalQuestions
+    ) {
+
         return null;
+
     }
 
-    const systemPrompt = `You are an expert technical interviewer.
+
+    const systemPrompt = `
+You are an expert technical interviewer.
+
 Generate exactly ONE concise interview question.
 
 Rules:
+
 - Base the question on the candidate profile and project experience where appropriate.
 - Follow the interview plan and the assigned topic.
 - Match difficulty level: ${difficulty}.
 - Must be practical rather than trivia.
 - Avoid repeating questions asked previously.
-- Keep the question concise and strictly under 200 characters so it can be spoken naturally by TTS.
+- Keep the question concise and strictly under 500 characters so it can be spoken naturally by TTS.
 - Do NOT use markdown.
 - Do NOT include any preamble, greetings, or explanations before or after the question.
-- Return ONLY the question text itself.`;
+- Return ONLY the question text itself.
+`;
+
 
     const userPrompt = `
 CANDIDATE PROFILE:
-${JSON.stringify(interview.candidateProfile, null, 2)}
 
-JOB DESCRIPTION:
-${interview.jobDescription}
-
-INTERVIEW PLAN:
-${JSON.stringify(interview.interviewPlan, null, 2)}
-
-PREVIOUS QUESTIONS AND ANSWERS:
 ${JSON.stringify(
-    interview.answers.map(a => ({ question: a.question, answer: a.answer })),
+    interview.candidateProfile,
     null,
     2
 )}
 
+
+JOB DESCRIPTION:
+
+${interview.jobDescription}
+
+
+INTERVIEW PLAN:
+
+${JSON.stringify(
+    interview.interviewPlan,
+    null,
+    2
+)}
+
+
+PREVIOUS QUESTIONS AND ANSWERS:
+
+${JSON.stringify(
+    interview.answers.map(a => ({
+        question: a.question,
+        answer: a.answer
+    })),
+    null,
+    2
+)}
+
+
 CURRENT TOPIC:
+
 ${currentTopic}
 
+
 CURRENT DIFFICULTY:
+
 ${difficulty}
 `;
 
-    const rawQuestion = await askOllama(systemPrompt, userPrompt);
-    let questionText = rawQuestion ? rawQuestion.replace(/\\/g, "").replace(/[`*#_]/g, "").trim() : "";
 
-    if (questionText.startsWith('"') && questionText.endsWith('"')) {
-        questionText = questionText.slice(1, -1).trim();
+    const rawQuestion =
+        await askOllama(
+            systemPrompt,
+            userPrompt
+        );
+
+
+    let questionText =
+        rawQuestion
+            ? rawQuestion
+                .replace(/\\/g, "")
+                .replace(/[`*#_]/g, "")
+                .trim()
+            : "";
+
+
+    if (
+        questionText.startsWith('"') &&
+        questionText.endsWith('"')
+    ) {
+
+        questionText =
+            questionText
+                .slice(1, -1)
+                .trim();
+
     }
 
+
     return {
+
         questionNumber,
-        topic: currentTopic,
+
+        topic:
+            currentTopic,
+
         difficulty,
-        question: questionText
+
+        question:
+            questionText
+
     };
 }
 
-// Background question generation with concurrency protection
-async function triggerBackgroundQuestionGeneration(interview) {
-    if (interview.isGeneratingNextQuestion) {
-        return;
-    }
 
-    if (interview.questionBuffer.length >= 1) {
-        return;
-    }
+// ============================================================
+// GENERATE QUESTION + TTS
+// ============================================================
 
-    const currentQNum = interview.currentQuestion ? interview.currentQuestion.questionNumber : 0;
-    const nextQNum = currentQNum + 1 + interview.questionBuffer.length;
+async function generateQuestionWithAudio(
+    interview,
+    questionNumber,
+    difficulty
+) {
 
-    if (nextQNum > interview.totalQuestions) {
-        return;
-    }
-
-    interview.isGeneratingNextQuestion = true;
-    try {
-        const questionObj = await generateQuestion(
+    const question =
+        await generateQuestion(
             interview,
-            nextQNum,
-            interview.currentDifficulty
+            questionNumber,
+            difficulty
         );
 
-        if (questionObj && questionObj.question) {
-            const expectedNext = (interview.currentQuestion?.questionNumber || 0) + 1;
-            if (questionObj.questionNumber === expectedNext && interview.questionBuffer.length === 0) {
-                interview.questionBuffer.push(questionObj);
-                console.log(`[Interview] Background buffered Q${questionObj.questionNumber} (${questionObj.difficulty})`);
+
+    if (!question) {
+        return null;
+    }
+
+
+    if (!question.question) {
+        throw new Error(
+            "Question generation returned empty question"
+        );
+    }
+
+
+    // Generate TTS immediately
+    const audio =
+        await generateQuestionAudio(
+            question.question
+        );
+
+
+    return {
+        ...question,
+
+        audio:
+            audio.audio,
+
+        audioMimeType:
+            audio.audioMimeType
+    };
+}
+
+
+// ============================================================
+// BACKGROUND QUESTION + TTS BUFFER
+// ============================================================
+
+async function triggerBackgroundQuestionGeneration(
+    interview
+) {
+
+    // Prevent duplicate generation
+    if (
+        interview.isGeneratingNextQuestion
+    ) {
+        return;
+    }
+
+
+    // We only need one question ahead
+    if (
+        interview.questionBuffer.length >= 1
+    ) {
+        return;
+    }
+
+
+    const currentQNum =
+        interview.currentQuestion
+            ? interview.currentQuestion.questionNumber
+            : 0;
+
+
+    const nextQNum =
+        currentQNum +
+        1 +
+        interview.questionBuffer.length;
+
+
+    if (
+        nextQNum >
+        interview.totalQuestions
+    ) {
+        return;
+    }
+
+
+    interview.isGeneratingNextQuestion =
+        true;
+
+
+    try {
+
+        console.log(
+            `[Interview] Generating Q${nextQNum} in background...`
+        );
+
+
+        const questionObj =
+            await generateQuestionWithAudio(
+                interview,
+                nextQNum,
+                interview.currentDifficulty
+            );
+
+
+        if (
+            questionObj &&
+            questionObj.question
+        ) {
+
+            const expectedNext =
+                (
+                    interview.currentQuestion
+                        ?.questionNumber || 0
+                ) + 1;
+
+
+            if (
+                questionObj.questionNumber ===
+                    expectedNext &&
+
+                interview.questionBuffer
+                    .length === 0
+            ) {
+
+                interview.questionBuffer.push(
+                    questionObj
+                );
+
+
+                console.log(
+                    `[Interview] Q${questionObj.questionNumber} + TTS buffered`
+                );
+
             }
+
         }
+
     } catch (err) {
-        console.error("Background question generation error:", err.message);
+
+        console.error(
+            "Background question/TTS generation error:",
+            err.message
+        );
+
     } finally {
-        interview.isGeneratingNextQuestion = false;
+
+        interview.isGeneratingNextQuestion =
+            false;
+
     }
 }
 
-app.post("/interview/:id/question", async (req, res) => {
-    try {
-        const interview = getInterview(req.params.id);
 
-        if (!interview) {
-            return res.status(404).json({
-                message: "Interview not found"
-            });
-        }
+// ============================================================
+// GET FIRST QUESTION
+// ============================================================
 
-        // If current question already exists, return it without regenerating
-        if (interview.currentQuestion) {
-            return res.status(200).json({
-                question: interview.currentQuestion.question,
-                questionNumber: interview.currentQuestion.questionNumber,
-                totalQuestions: interview.totalQuestions,
-                topic: interview.currentQuestion.topic,
-                difficulty: interview.currentQuestion.difficulty
-            });
-        }
+app.post(
+    "/interview/:id/question",
 
-        // First call: generate Q1 and Q2
-        const q1 = await generateQuestion(interview, 1, interview.currentDifficulty);
-        if (!q1) {
-            return res.status(400).json({ message: "Interview completed" });
-        }
+    async (req, res) => {
 
-        interview.currentQuestion = q1;
-        interview.questions.push(q1);
+        try {
 
-        // Pre-generate Q2 if there are more questions
-        if (interview.totalQuestions >= 2) {
-            try {
-                const q2 = await generateQuestion(interview, 2, interview.currentDifficulty);
-                if (q2) {
-                    interview.questionBuffer.push(q2);
-                    console.log(`[Interview] Initial buffered Q2 (${q2.difficulty})`);
-                }
-            } catch (err) {
-                console.error("Failed initial Q2 buffer generation:", err.message);
+            const interview =
+                getInterview(
+                    req.params.id
+                );
+
+
+            if (!interview) {
+
+                return res.status(404).json({
+                    message:
+                        "Interview not found"
+                });
+
             }
+
+
+            // ------------------------------------------
+            // If question already exists
+            // ------------------------------------------
+
+            if (
+                interview.currentQuestion
+            ) {
+
+                return res.status(200).json({
+
+                    question:
+                        interview.currentQuestion.question,
+
+                    questionNumber:
+                        interview.currentQuestion
+                            .questionNumber,
+
+                    totalQuestions:
+                        interview.totalQuestions,
+
+                    topic:
+                        interview.currentQuestion.topic,
+
+                    difficulty:
+                        interview.currentQuestion.difficulty,
+
+                    audio:
+                        interview.currentQuestion.audio,
+
+                    audioMimeType:
+                        interview.currentQuestion
+                            .audioMimeType
+
+                });
+
+            }
+
+
+            // ------------------------------------------
+            // Generate Q1 + TTS
+            // ------------------------------------------
+
+            const q1 =
+                await generateQuestionWithAudio(
+                    interview,
+                    1,
+                    interview.currentDifficulty
+                );
+
+
+            if (!q1) {
+
+                return res.status(400).json({
+                    message:
+                        "Interview completed"
+                });
+
+            }
+
+
+            // ------------------------------------------
+            // Store Q1
+            // ------------------------------------------
+
+            interview.currentQuestion =
+                q1;
+
+
+            interview.questions.push(
+                q1
+            );
+
+
+            // ------------------------------------------
+            // Generate Q2 + TTS in background
+            // ------------------------------------------
+
+            if (
+                interview.totalQuestions >= 2
+            ) {
+
+                triggerBackgroundQuestionGeneration(
+                    interview
+                );
+
+            }
+
+
+            // ------------------------------------------
+            // Return Q1 + audio
+            // ------------------------------------------
+
+            return res.status(200).json({
+
+                question:
+                    q1.question,
+
+                questionNumber:
+                    q1.questionNumber,
+
+                totalQuestions:
+                    interview.totalQuestions,
+
+                topic:
+                    q1.topic,
+
+                difficulty:
+                    q1.difficulty,
+
+                audio:
+                    q1.audio,
+
+                audioMimeType:
+                    q1.audioMimeType
+
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "Question generation error:",
+                error.response?.data ||
+                error.message
+            );
+
+
+            return res.status(500).json({
+
+                message:
+                    "Failed to generate question"
+
+            });
+
         }
-
-        return res.status(200).json({
-            question: q1.question,
-            questionNumber: q1.questionNumber,
-            totalQuestions: interview.totalQuestions,
-            topic: q1.topic,
-            difficulty: q1.difficulty
-        });
-
-    } catch (error) {
-        console.error(
-            "Question generation error:",
-            error.response?.data || error.message
-        );
-
-        return res.status(500).json({
-            message: "Failed to generate question"
-        });
     }
-});
+);
 
-app.post("/interview/:id/answer", async (req, res) => {
-    try {
-        const interview = getInterview(req.params.id);
 
-        if (!interview) {
-            return res.status(404).json({
-                message: "Interview not found"
-            });
-        }
+// ============================================================
+// ANSWER
+// ============================================================
 
-        const { answer } = req.body;
+app.post(
+    "/interview/:id/answer",
 
-        if (!answer || !answer.trim()) {
-            return res.status(400).json({
-                message: "Answer is required"
-            });
-        }
+    async (req, res) => {
 
-        const currentQ = interview.currentQuestion || {
-            questionNumber: 1,
-            question: "Interview question",
-            topic: "General",
-            difficulty: interview.currentDifficulty
-        };
+        try {
 
-        const answerEvaluationPrompt = `
+            const interview =
+                getInterview(
+                    req.params.id
+                );
+
+
+            if (!interview) {
+
+                return res.status(404).json({
+                    message:
+                        "Interview not found"
+                });
+
+            }
+
+
+            const {
+                answer
+            } = req.body;
+
+
+            if (
+                !answer ||
+                !answer.trim()
+            ) {
+
+                return res.status(400).json({
+                    message:
+                        "Answer is required"
+                });
+
+            }
+
+
+            // ------------------------------------------
+            // Current question
+            // ------------------------------------------
+
+            const currentQ =
+                interview.currentQuestion || {
+
+                    questionNumber: 1,
+
+                    question:
+                        "Interview question",
+
+                    topic:
+                        "General",
+
+                    difficulty:
+                        interview.currentDifficulty
+
+                };
+
+
+            // ------------------------------------------
+            // Evaluate answer
+            // ------------------------------------------
+
+const answerEvaluationPrompt = `
 You are an expert technical interview evaluator.
 
 Evaluate the candidate's answer to the interview question.
 
+IMPORTANT:
+The candidate's answer was spoken verbally and then converted to text using
+Speech-to-Text (STT). Therefore, the transcript may contain transcription
+errors that are not the candidate's actual mistakes.
+
 Candidate profile:
-${JSON.stringify(interview.candidateProfile)}
+
+${JSON.stringify(
+    interview.candidateProfile
+)}
 
 Interview question:
+
 ${currentQ.question}
 
-Candidate answer:
+Candidate answer (STT transcript):
+
 ${answer}
 
 Evaluate the answer based on:
+
 - correctness
 - relevance
 - completeness
 - technical depth
 - clarity
+- understanding of the underlying concept
+
+STT TRANSCRIPTION RULES:
+
+1. Do NOT penalize the candidate for obvious STT-related mistakes when the
+   intended meaning is reasonably clear.
+
+2. Ignore minor:
+   - spelling mistakes
+   - punctuation mistakes
+   - capitalization mistakes
+   - grammar mistakes caused by speech
+   - phonetic transcription mistakes
+   - words that sound similar but are clearly identifiable from context
+
+3. Technical terms may be transcribed incorrectly by STT. Infer the intended
+   technical term when the surrounding context makes it reasonably clear.
+
+   Examples:
+   - "use memo" -> "useMemo"
+   - "use callback" -> "useCallback"
+   - "sequel" -> "SQL"
+   - "node j s" -> "Node.js"
+   - "express j s" -> "Express.js"
+   - "mongo d b" -> "MongoDB"
+   - "rest API" -> "REST API"
+
+4. Evaluate what the candidate most reasonably intended to communicate,
+   rather than judging the quality of the transcription itself.
+
+5. Do NOT assume every unusual word is an STT error. If the candidate
+   actually demonstrates an incorrect technical concept, penalize it.
+
+   Example:
+   "useMemo is used to make API requests."
+
+   This is a technical misunderstanding and should be penalized even though
+   the transcription itself may be correct.
+
+6. Do not give credit for concepts that the candidate did not actually
+   communicate. Do not invent missing explanations or assume knowledge that
+   is not present in the answer.
+
+7. Do not penalize the candidate for imperfect spoken-language grammar unless
+   it makes the technical meaning unclear.
+
+8. Evaluate the answer according to the exact question being asked and the
+   expected knowledge level for that question.
+
+9. Distinguish between:
+   - STT/transcription error
+   - minor wording issue
+   - actual technical misunderstanding
+
+10. If an STT error makes the answer ambiguous and there are multiple
+    plausible interpretations, do not assume the most favorable interpretation.
+    Evaluate only what can reasonably be understood from the context.
+
+SCORING:
+
+- 9-10: Excellent understanding, technically correct and sufficiently complete
+- 7-8: Good understanding with minor omissions or inaccuracies
+- 5-6: Partial understanding with noticeable gaps
+- 3-4: Significant misunderstanding or major missing concepts
+- 0-2: Mostly incorrect, irrelevant, or demonstrates very little understanding
 
 Return ONLY valid JSON.
 
 Output format:
+
 {
   "score": number,
   "correctness": "correct" | "mostly_correct" | "partially_correct" | "incorrect",
@@ -511,137 +1057,285 @@ Output format:
 }
 
 Rules:
+
 - score must be between 0 and 10
 - Do not judge grammar unless it affects technical clarity.
 - Do not invent technologies or concepts that the candidate did not mention.
 - Evaluate according to the question being asked.
+- Do not penalize obvious STT errors when the intended technical meaning is clear.
+- Do penalize genuine technical misunderstandings.
+- Return ONLY valid JSON with no markdown, explanation, or code fences.
 `;
 
-        const evaluatorText = await askOllama("You are an expert technical interview evaluator.", answerEvaluationPrompt);
-        const evaluation = AnswerEvaluationSchema.parse(
-            parseLLMJson(evaluatorText)
+            const evaluatorText =
+                await askOllama(
+                    "You are an expert technical interview evaluator.",
+                    answerEvaluationPrompt
+                );
+
+
+            const evaluation =
+                AnswerEvaluationSchema.parse(
+                    parseLLMJson(
+                        evaluatorText
+                    )
+                );
+
+
+            // ------------------------------------------
+            // Store answer
+            // ------------------------------------------
+
+            interview.answers.push({
+
+                question:
+                    currentQ.question,
+
+                questionNumber:
+                    currentQ.questionNumber,
+
+                topic:
+                    currentQ.topic,
+
+                difficulty:
+                    currentQ.difficulty,
+
+                answer:
+                    answer.trim(),
+
+                evaluation
+
+            });
+
+
+            // ------------------------------------------
+            // Adaptive difficulty
+            // ------------------------------------------
+
+            const newDifficulty =
+                getNextDifficulty(
+                    evaluation.score,
+                    interview.currentDifficulty
+                );
+
+
+            interview.currentDifficulty =
+                newDifficulty;
+
+
+            // ------------------------------------------
+            // Final question
+            // ------------------------------------------
+
+            if (
+                currentQ.questionNumber >=
+                interview.totalQuestions
+            ) {
+
+                const overallEvaluation =
+                    await generateOverallEvaluation(
+                        interview
+                    );
+
+
+                interview.overallEvaluation =
+                    overallEvaluation;
+
+
+                return res.status(200).json({
+
+                    message:
+                        "Interview completed",
+
+                    completed:
+                        true,
+
+                    evaluation,
+
+                    totalQuestions:
+                        interview.totalQuestions,
+
+                    overallEvaluation
+
+                });
+
+            }
+
+
+            // ------------------------------------------
+            // Get next question
+            // ------------------------------------------
+
+            let nextQuestion = null;
+
+
+            // First try buffered question
+            if (
+                interview.questionBuffer
+                    .length > 0
+            ) {
+
+                nextQuestion =
+                    interview.questionBuffer.shift();
+
+
+                console.log(
+                    `[Interview] Using buffered Q${nextQuestion.questionNumber} + TTS`
+                );
+
+            } else {
+
+                // Fallback if background
+                // generation wasn't finished
+                console.log(
+                    "[Interview] Buffer empty, generating next question + TTS..."
+                );
+
+
+                const targetQNum =
+                    currentQ.questionNumber + 1;
+
+
+                nextQuestion =
+                    await generateQuestionWithAudio(
+                        interview,
+                        targetQNum,
+                        interview.currentDifficulty
+                    );
+
+            }
+
+
+            // ------------------------------------------
+            // If no question
+            // ------------------------------------------
+
+            if (!nextQuestion) {
+
+                const overallEvaluation =
+                    await generateOverallEvaluation(
+                        interview
+                    );
+
+
+                interview.overallEvaluation =
+                    overallEvaluation;
+
+
+                return res.status(200).json({
+
+                    message:
+                        "Interview completed",
+
+                    completed:
+                        true,
+
+                    evaluation,
+
+                    totalQuestions:
+                        interview.totalQuestions,
+
+                    overallEvaluation
+
+                });
+
+            }
+
+
+            // ------------------------------------------
+            // Set current question
+            // ------------------------------------------
+
+            interview.currentQuestion =
+                nextQuestion;
+
+
+            interview.questions.push(
+                nextQuestion
+            );
+
+
+            // ------------------------------------------
+            // Start generating question after next
+            // ------------------------------------------
+
+            triggerBackgroundQuestionGeneration(
+                interview
+            );
+
+
+            // ------------------------------------------
+            // Return evaluation + next question + TTS
+            // ------------------------------------------
+
+            return res.status(200).json({
+
+                message:
+                    "Answer evaluated",
+
+                completed:
+                    false,
+
+                evaluation,
+
+                newDifficulty,
+
+                question:
+                    nextQuestion.question,
+
+                questionNumber:
+                    nextQuestion.questionNumber,
+
+                totalQuestions:
+                    interview.totalQuestions,
+
+                topic:
+                    nextQuestion.topic,
+
+                difficulty:
+                    nextQuestion.difficulty,
+
+                audio:
+                    nextQuestion.audio,
+
+                audioMimeType:
+                    nextQuestion.audioMimeType
+
+            });
+
+
+        } catch (error) {
+
+            console.error(
+                "Answer evaluation error:",
+                error.response?.data ||
+                error.message
+            );
+
+
+            return res.status(500).json({
+
+                message:
+                    "Failed to process answer"
+
+            });
+
+        }
+    }
+);
+
+
+// ============================================================
+// SERVER
+// ============================================================
+
+app.listen(
+    5000,
+    () => {
+
+        console.log(
+            "Server started at http://localhost:5000"
         );
 
-        interview.answers.push({
-            question: currentQ.question,
-            questionNumber: currentQ.questionNumber,
-            topic: currentQ.topic,
-            difficulty: currentQ.difficulty,
-            answer: answer.trim(),
-            evaluation
-        });
-
-        // Update adaptive difficulty
-        const newDifficulty = getNextDifficulty(evaluation.score, interview.currentDifficulty);
-        interview.currentDifficulty = newDifficulty;
-
-        // Check if final question
-        if (currentQ.questionNumber >= interview.totalQuestions) {
-            const overallEvaluation = await generateOverallEvaluation(interview);
-            interview.overallEvaluation = overallEvaluation;
-            return res.status(200).json({
-                message: "Interview completed",
-                completed: true,
-                evaluation,
-                totalQuestions: interview.totalQuestions,
-                overallEvaluation
-            });
-        }
-
-        // Non-final question transition: pull from buffer or fallback
-        let nextQuestion = null;
-        if (interview.questionBuffer.length > 0) {
-            nextQuestion = interview.questionBuffer.shift();
-        } else {
-            // Fallback generation if buffer was empty
-            const targetQNum = currentQ.questionNumber + 1;
-            nextQuestion = await generateQuestion(interview, targetQNum, interview.currentDifficulty);
-        }
-
-        if (!nextQuestion) {
-            // If no more topics or question generated, complete interview
-            const overallEvaluation = await generateOverallEvaluation(interview);
-            interview.overallEvaluation = overallEvaluation;
-            return res.status(200).json({
-                message: "Interview completed",
-                completed: true,
-                evaluation,
-                totalQuestions: interview.totalQuestions,
-                overallEvaluation
-            });
-        }
-
-        interview.currentQuestion = nextQuestion;
-        interview.questions.push(nextQuestion);
-
-        // Immediately trigger background generation for the following question
-        triggerBackgroundQuestionGeneration(interview);
-
-        return res.status(200).json({
-            message: "Answer evaluated",
-            completed: false,
-            evaluation,
-            newDifficulty,
-            question: nextQuestion.question,
-            questionNumber: nextQuestion.questionNumber,
-            totalQuestions: interview.totalQuestions,
-            topic: nextQuestion.topic,
-            difficulty: nextQuestion.difficulty
-        });
-
-    } catch (error) {
-        console.error("Answer evaluation error:", error);
-
-        res.status(500).json({
-            message: "Failed to process answer"
-        });
     }
-});
-
-// Groq Orpheus TTS endpoint
-app.post("/voice/speak", async (req, res) => {
-    try {
-        const { text, voice } = req.body;
-
-        if (!text || typeof text !== "string" || !text.trim()) {
-            return res.status(400).json({
-                message: "Text is required"
-            });
-        }
-
-        const trimmedText = text.trim();
-        if (trimmedText.length > 200) {
-            return res.status(400).json({
-                message: `Text exceeds maximum 200 characters limit (${trimmedText.length} characters provided)`
-            });
-        }
-
-        const chosenVoice = voice || process.env.GROQ_TTS_VOICE || "troy";
-
-        const response = await groq.audio.speech.create({
-            model: "canopylabs/orpheus-v1-english",
-            voice: chosenVoice,
-            input: trimmedText,
-            response_format: "wav"
-        });
-
-        const buffer = Buffer.from(await response.arrayBuffer());
-        res.set("Content-Type", "audio/wav");
-        return res.send(buffer);
-
-    } catch (error) {
-        console.error("Groq TTS Error:", error.message);
-        return res.status(500).json({
-            message: "Failed to generate speech",
-            error: error.message
-        });
-    }
-});
-
-app.listen(5000, () => {
-
-    console.log(
-        "Server started at http://localhost:5000"
-    );
-
-});
+);
